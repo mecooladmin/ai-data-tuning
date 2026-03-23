@@ -15,15 +15,9 @@ export function Home() {
 
   return (
     <div className="min-h-screen bg-background relative flex flex-col">
-      {/* Background Hero Element */}
-      <div className="absolute top-0 left-0 right-0 h-[50vh] overflow-hidden -z-10 pointer-events-none">
-        <div className="absolute inset-0 bg-gradient-to-b from-primary/5 to-background z-10" />
-        <img 
-          src={`${import.meta.env.BASE_URL}images/pipeline-hero-bg.png`}
-          alt="Technical Pipeline Background"
-          className="w-full h-full object-cover opacity-30 mix-blend-screen"
-        />
-        <div className="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-background to-transparent" />
+      {/* Subtle top gradient accent */}
+      <div className="absolute top-0 left-0 right-0 h-64 overflow-hidden -z-10 pointer-events-none">
+        <div className="absolute inset-0 bg-gradient-to-b from-primary/8 to-background" />
       </div>
 
       <Navbar />
@@ -31,13 +25,13 @@ export function Home() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-12 z-0">
         <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-12">
           <div>
-            <h1 className="text-4xl font-extrabold tracking-tight mb-2 text-white glow-text">Active Pipelines</h1>
+            <h1 className="text-4xl font-extrabold tracking-tight mb-2 text-foreground">Active Pipelines</h1>
             <p className="text-lg text-muted-foreground">Manage your document intelligence extraction tasks.</p>
           </div>
-          <Button 
+          <Button
             onClick={() => setCreateOpen(true)}
             size="lg"
-            className="bg-primary text-primary-foreground hover:bg-primary/90 font-semibold shadow-[0_0_20px_rgba(6,182,212,0.2)] hover:shadow-[0_0_30px_rgba(6,182,212,0.4)] transition-all"
+            className="bg-primary text-primary-foreground hover:bg-primary/90 font-semibold transition-all"
           >
             <Plus className="w-5 h-5 mr-2" /> New Pipeline Job
           </Button>
@@ -46,60 +40,60 @@ export function Home() {
         {isLoading ? (
           <div className="w-full h-64 flex flex-col items-center justify-center text-muted-foreground">
             <Loader2 className="w-8 h-8 animate-spin text-primary mb-4" />
-            <p>Scanning systems...</p>
+            <p>Loading pipelines…</p>
           </div>
         ) : isError ? (
           <div className="w-full p-8 rounded-2xl bg-destructive/10 border border-destructive/20 text-center">
             <ServerCrash className="w-12 h-12 text-destructive mx-auto mb-4" />
             <h3 className="text-xl font-bold text-destructive mb-2">Connection Error</h3>
-            <p className="text-muted-foreground">Failed to communicate with the pipeline orchestration server.</p>
+            <p className="text-muted-foreground">Failed to communicate with the pipeline server.</p>
           </div>
         ) : data?.jobs.length === 0 ? (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="w-full p-16 rounded-3xl glass-panel text-center border-dashed border-2 border-white/10"
+            className="w-full p-16 rounded-3xl glass-panel text-center border-dashed border-2 border-border"
           >
-            <div className="w-20 h-20 bg-secondary/50 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-inner">
+            <div className="w-20 h-20 bg-accent rounded-2xl flex items-center justify-center mx-auto mb-6">
               <Cpu className="w-10 h-10 text-primary opacity-80" />
             </div>
-            <h3 className="text-2xl font-bold text-white mb-3">No Active Jobs</h3>
+            <h3 className="text-2xl font-bold text-foreground mb-3">No Active Jobs</h3>
             <p className="text-muted-foreground max-w-md mx-auto mb-8">
               Initialize a new job to start extracting text, detecting entities, and reconstructing chronological timelines from your documents.
             </p>
-            <Button onClick={() => setCreateOpen(true)} variant="outline" className="border-primary/30 hover:bg-primary/10 text-primary">
+            <Button onClick={() => setCreateOpen(true)} variant="outline" className="border-primary/40 hover:bg-accent text-primary">
               <Plus className="w-4 h-4 mr-2" /> Initialize Setup
             </Button>
           </motion.div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
             {data?.jobs.map((job, i) => (
-              <motion.div 
+              <motion.div
                 key={job.id}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: i * 0.05 }}
               >
                 <Link href={`/jobs/${job.id}`} className="block h-full group">
-                  <div className="h-full bg-card rounded-2xl p-6 border border-border/50 shadow-xl shadow-black/20 group-hover:border-primary/30 group-hover:shadow-primary/5 transition-all duration-300 relative overflow-hidden">
-                    <div className="absolute top-0 right-0 p-6 opacity-5 group-hover:opacity-20 transition-opacity duration-500">
+                  <div className="h-full bg-card rounded-2xl p-6 border border-border shadow-sm group-hover:border-primary/40 group-hover:shadow-md transition-all duration-300 relative overflow-hidden">
+                    <div className="absolute top-0 right-0 p-6 opacity-[0.04] group-hover:opacity-[0.08] transition-opacity duration-500">
                       <Cpu className="w-24 h-24 text-primary" />
                     </div>
-                    
+
                     <div className="relative z-10 flex flex-col h-full">
                       <div className="flex justify-between items-start mb-4">
-                        <div className="font-mono text-xs text-muted-foreground bg-background px-2 py-1 rounded border border-border/50">
+                        <div className="font-mono text-xs text-muted-foreground bg-muted px-2 py-1 rounded border border-border">
                           {job.id.split('-')[0]}
                         </div>
                         <JobStatusBadge status={job.status} />
                       </div>
-                      
-                      <h3 className="text-xl font-bold text-white mb-2 group-hover:text-primary transition-colors line-clamp-1">{job.name}</h3>
+
+                      <h3 className="text-xl font-bold text-foreground mb-2 group-hover:text-primary transition-colors line-clamp-1">{job.name}</h3>
                       <p className="text-sm text-muted-foreground mb-6 line-clamp-2 flex-1">
                         {job.description || "No description provided."}
                       </p>
-                      
-                      <div className="flex items-center justify-between mt-auto pt-6 border-t border-border/50">
+
+                      <div className="flex items-center justify-between mt-auto pt-6 border-t border-border">
                         <div className="flex items-center gap-2 text-sm text-muted-foreground">
                           <Files className="w-4 h-4" />
                           <span>{job.fileCount} {job.fileCount === 1 ? 'file' : 'files'}</span>
