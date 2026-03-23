@@ -1,38 +1,35 @@
 import { Router, type IRouter } from "express";
 import multer from "multer";
 import path from "path";
-import fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { db, jobsTable, uploadedFilesTable, timelineEventsTable, jobOutputsTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, count } from "drizzle-orm";
 import { processJob } from "../lib/pipeline/processor.js";
-import {
-  CreateJobBody,
-} from "@workspace/api-zod";
+import { extractFileFromBuffer } from "../lib/pipeline/extractor.js";
+import { PIPELINE_CONFIG } from "../lib/pipeline/config.js";
+import { CreateJobBody } from "@workspace/api-zod";
 
 const router: IRouter = Router();
 
-const UPLOADS_DIR = path.resolve(process.cwd(), "uploads");
-
-// Ensure uploads dir exists
-async function ensureUploadsDir() {
-  await fs.mkdir(UPLOADS_DIR, { recursive: true });
-}
-ensureUploadsDir().catch(() => {});
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `${randomUUID()}${ext}`);
-  },
-});
-
+// Memory storage — works on Vercel (no persistent disk needed).
+// Text is extracted immediately at upload and stored in the DB.
 const upload = multer({
-  storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: PIPELINE_CONFIG.maxFileSizeBytes,
+    files: PIPELINE_CONFIG.maxFilesPerRequest,
+  },
+  fileFilter(_req, file, cb) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const allowed =
+      PIPELINE_CONFIG.supportedMimeTypes.includes(file.mimetype as any) ||
+      PIPELINE_CONFIG.supportedExtensions.includes(ext as any);
+    if (!allowed) {
+      cb(new Error(`Unsupported file type: ${file.mimetype} (${ext})`));
+    } else {
+      cb(null, true);
+    }
+  },
 });
 
 function jobToResponse(job: typeof jobsTable.$inferSelect, fileCount = 0) {
@@ -54,8 +51,11 @@ router.get("/jobs", async (req, res) => {
 
   const results = await Promise.all(
     jobs.map(async (job) => {
-      const files = await db.select({ id: uploadedFilesTable.id }).from(uploadedFilesTable).where(eq(uploadedFilesTable.jobId, job.id));
-      return jobToResponse(job, files.length);
+      const [{ value: fileCount }] = await db
+        .select({ value: count() })
+        .from(uploadedFilesTable)
+        .where(eq(uploadedFilesTable.jobId, job.id));
+      return jobToResponse(job, Number(fileCount));
     })
   );
 
@@ -70,7 +70,7 @@ router.post("/jobs", async (req, res) => {
     return;
   }
 
-  const job = await db
+  const [job] = await db
     .insert(jobsTable)
     .values({
       id: randomUUID(),
@@ -80,7 +80,7 @@ router.post("/jobs", async (req, res) => {
     })
     .returning();
 
-  res.status(201).json(jobToResponse(job[0], 0));
+  res.status(201).json(jobToResponse(job, 0));
 });
 
 // GET /jobs/:jobId
@@ -91,57 +91,97 @@ router.get("/jobs/:jobId", async (req, res) => {
     return;
   }
 
-  const files = await db.select().from(uploadedFilesTable).where(eq(uploadedFilesTable.jobId, job.id));
+  const files = await db
+    .select({
+      id: uploadedFilesTable.id,
+      jobId: uploadedFilesTable.jobId,
+      filename: uploadedFilesTable.filename,
+      mimeType: uploadedFilesTable.mimeType,
+      sizeBytes: uploadedFilesTable.sizeBytes,
+      createdAt: uploadedFilesTable.createdAt,
+    })
+    .from(uploadedFilesTable)
+    .where(eq(uploadedFilesTable.jobId, job.id));
 
   res.json({
     ...jobToResponse(job, files.length),
     files: files.map((f) => ({
-      id: f.id,
-      jobId: f.jobId,
-      filename: f.filename,
-      mimeType: f.mimeType,
-      sizeBytes: f.sizeBytes,
+      ...f,
       createdAt: f.createdAt.toISOString(),
     })),
   });
 });
 
-// POST /jobs/:jobId/upload
-router.post("/jobs/:jobId/upload", upload.single("file"), async (req, res) => {
+// POST /jobs/:jobId/upload  — supports single or multiple files
+router.post("/jobs/:jobId/upload", upload.array("file", PIPELINE_CONFIG.maxFilesPerRequest), async (req, res) => {
   const job = await db.query.jobsTable.findFirst({ where: eq(jobsTable.id, req.params.jobId) });
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;
   }
 
-  if (!req.file) {
-    res.status(400).json({ error: "No file uploaded" });
+  if (!req.files || (Array.isArray(req.files) && req.files.length === 0)) {
+    res.status(400).json({ error: "No files uploaded. Use field name 'file'." });
     return;
   }
 
-  const fileRecord = await db
-    .insert(uploadedFilesTable)
-    .values({
-      id: randomUUID(),
-      jobId: job.id,
-      filename: req.file.originalname,
-      mimeType: req.file.mimetype,
-      sizeBytes: req.file.size,
-      storagePath: req.file.path,
-    })
-    .returning();
+  // Check total files per job
+  const [{ value: existingCount }] = await db
+    .select({ value: count() })
+    .from(uploadedFilesTable)
+    .where(eq(uploadedFilesTable.jobId, job.id));
 
-  // Update job updatedAt
+  const files = Array.isArray(req.files) ? req.files : Object.values(req.files).flat();
+
+  if (Number(existingCount) + files.length > PIPELINE_CONFIG.maxFilesPerJob) {
+    res.status(400).json({
+      error: `Job already has ${existingCount} files. Max is ${PIPELINE_CONFIG.maxFilesPerJob} per job.`,
+    });
+    return;
+  }
+
+  const uploaded = [];
+
+  for (const file of files) {
+    // Extract text immediately — this is what makes it Vercel-compatible
+    const extracted = await extractFileFromBuffer(
+      file.buffer,
+      file.originalname,
+      file.mimetype
+    ).catch(() => null);
+
+    const [record] = await db
+      .insert(uploadedFilesTable)
+      .values({
+        id: randomUUID(),
+        jobId: job.id,
+        filename: file.originalname,
+        mimeType: file.mimetype,
+        sizeBytes: file.size,
+        storagePath: "", // No disk storage needed — rawText is persisted in DB
+        rawText: extracted?.rawText ?? null,
+      })
+      .returning();
+
+    uploaded.push({
+      id: record.id,
+      jobId: record.jobId,
+      filename: record.filename,
+      mimeType: record.mimeType,
+      sizeBytes: record.sizeBytes,
+      createdAt: record.createdAt.toISOString(),
+    });
+  }
+
+  // Update job timestamp
   await db.update(jobsTable).set({ updatedAt: new Date() }).where(eq(jobsTable.id, job.id));
 
-  res.status(201).json({
-    id: fileRecord[0].id,
-    jobId: fileRecord[0].jobId,
-    filename: fileRecord[0].filename,
-    mimeType: fileRecord[0].mimeType,
-    sizeBytes: fileRecord[0].sizeBytes,
-    createdAt: fileRecord[0].createdAt.toISOString(),
-  });
+  // Return array if multiple, single object if one (backward compat)
+  if (uploaded.length === 1) {
+    res.status(201).json(uploaded[0]);
+  } else {
+    res.status(201).json({ files: uploaded });
+  }
 });
 
 // POST /jobs/:jobId/process
@@ -152,12 +192,14 @@ router.post("/jobs/:jobId/process", async (req, res) => {
     return;
   }
 
-  const files = await db.select({ id: uploadedFilesTable.id }).from(uploadedFilesTable).where(eq(uploadedFilesTable.jobId, job.id));
+  const [{ value: fileCount }] = await db
+    .select({ value: count() })
+    .from(uploadedFilesTable)
+    .where(eq(uploadedFilesTable.jobId, job.id));
 
-  // Respond immediately, then process async
-  res.status(202).json(jobToResponse(job, files.length));
+  res.status(202).json(jobToResponse(job, Number(fileCount)));
 
-  // Non-blocking
+  // Fire-and-forget — process asynchronously
   processJob(job.id).catch((err) => {
     req.log.error({ err, jobId: job.id }, "Background processing failed");
   });
@@ -200,7 +242,9 @@ router.get("/jobs/:jobId/outputs", async (req, res) => {
     return;
   }
 
-  const output = await db.query.jobOutputsTable.findFirst({ where: eq(jobOutputsTable.jobId, job.id) });
+  const output = await db.query.jobOutputsTable.findFirst({
+    where: eq(jobOutputsTable.jobId, job.id),
+  });
 
   if (!output) {
     res.json({
@@ -225,6 +269,31 @@ router.get("/jobs/:jobId/outputs", async (req, res) => {
     fineTuneExamples: JSON.parse(output.fineTuneExamples ?? "[]"),
     validationReport: JSON.parse(output.validationReport ?? "{}"),
   });
+});
+
+// Multer error handler for this router
+router.use((err: any, _req: any, res: any, next: any) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      res.status(413).json({
+        error: `File too large. Maximum size is ${PIPELINE_CONFIG.maxFileSizeMB} MB.`,
+      });
+      return;
+    }
+    if (err.code === "LIMIT_FILE_COUNT") {
+      res.status(400).json({
+        error: `Too many files. Maximum ${PIPELINE_CONFIG.maxFilesPerRequest} per request.`,
+      });
+      return;
+    }
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  if (err?.message?.startsWith("Unsupported file type")) {
+    res.status(415).json({ error: err.message });
+    return;
+  }
+  next(err);
 });
 
 export default router;

@@ -3,13 +3,20 @@ import { db, jobsTable, uploadedFilesTable, timelineEventsTable, jobOutputsTable
 import { eq } from "drizzle-orm";
 import { extractFile } from "./extractor.js";
 import { extractEvents, mergeAndSortEvents } from "./nlp.js";
-import { generateMasterDocument, generateRagChunks, generateFineTuneExamples, generateValidationReport } from "./output-generator.js";
+import {
+  generateMasterDocument,
+  generateRagChunks,
+  generateFineTuneExamples,
+  generateValidationReport,
+} from "./output-generator.js";
 import type { DetectedEvent } from "./types.js";
 import { logger } from "../logger.js";
 
 export async function processJob(jobId: string): Promise<void> {
-  // Mark as processing
-  await db.update(jobsTable).set({ status: "processing", updatedAt: new Date() }).where(eq(jobsTable.id, jobId));
+  await db
+    .update(jobsTable)
+    .set({ status: "processing", updatedAt: new Date() })
+    .where(eq(jobsTable.id, jobId));
 
   try {
     const job = await db.query.jobsTable.findFirst({ where: eq(jobsTable.id, jobId) });
@@ -22,18 +29,28 @@ export async function processJob(jobId: string): Promise<void> {
 
     for (const file of files) {
       try {
-        logger.info({ fileId: file.id, filename: file.filename }, "Extracting file");
+        logger.info({ fileId: file.id, filename: file.filename }, "Processing file");
 
-        const extracted = await extractFile(file.storagePath, file.filename, file.mimeType);
+        let rawText: string;
 
-        // Update raw text in DB
-        await db
-          .update(uploadedFilesTable)
-          .set({ rawText: extracted.rawText })
-          .where(eq(uploadedFilesTable.id, file.id));
+        if (file.rawText) {
+          // Fast path: text was extracted at upload time (Vercel-compatible)
+          rawText = file.rawText;
+          logger.info({ fileId: file.id }, "Using pre-extracted text from DB");
+        } else if (file.storagePath) {
+          // Fallback: re-extract from disk (legacy / local dev only)
+          const extracted = await extractFile(file.storagePath, file.filename, file.mimeType);
+          rawText = extracted.rawText;
+          // Cache it back
+          await db
+            .update(uploadedFilesTable)
+            .set({ rawText })
+            .where(eq(uploadedFilesTable.id, file.id));
+        } else {
+          rawText = `[No content available for ${file.filename}]`;
+        }
 
-        // Extract events from this file
-        const events = extractEvents(extracted.rawText, file.filename);
+        const events = extractEvents(rawText, file.filename);
         allEvents.push(...events);
         processedFiles++;
 
@@ -43,13 +60,12 @@ export async function processJob(jobId: string): Promise<void> {
       }
     }
 
-    // Sort and merge all events
     const sortedEvents = mergeAndSortEvents(allEvents);
 
-    // Clear existing timeline events for this job
+    // Clear existing timeline events
     await db.delete(timelineEventsTable).where(eq(timelineEventsTable.jobId, jobId));
 
-    // Insert timeline events
+    // Insert new timeline events
     for (let i = 0; i < sortedEvents.length; i++) {
       const event = sortedEvents[i];
       await db.insert(timelineEventsTable).values({
@@ -67,13 +83,11 @@ export async function processJob(jobId: string): Promise<void> {
       });
     }
 
-    // Generate outputs
     const masterDocument = generateMasterDocument(sortedEvents, job.name);
     const ragChunks = generateRagChunks(sortedEvents);
     const fineTuneExamples = generateFineTuneExamples(sortedEvents, job.name);
     const validationReport = generateValidationReport(files.length, processedFiles, sortedEvents);
 
-    // Delete existing output and insert new
     await db.delete(jobOutputsTable).where(eq(jobOutputsTable.jobId, jobId));
     await db.insert(jobOutputsTable).values({
       id: randomUUID(),
@@ -84,19 +98,17 @@ export async function processJob(jobId: string): Promise<void> {
       validationReport: JSON.stringify(validationReport),
     });
 
-    // Mark as completed
-    await db.update(jobsTable).set({ status: "completed", updatedAt: new Date() }).where(eq(jobsTable.id, jobId));
+    await db
+      .update(jobsTable)
+      .set({ status: "completed", updatedAt: new Date() })
+      .where(eq(jobsTable.id, jobId));
 
-    logger.info({ jobId, events: sortedEvents.length, ragChunks: ragChunks.length }, "Job completed");
+    logger.info({ jobId, events: sortedEvents.length }, "Job completed");
   } catch (err) {
     logger.error({ jobId, err }, "Job failed");
     await db
       .update(jobsTable)
-      .set({
-        status: "failed",
-        errorMessage: String(err),
-        updatedAt: new Date(),
-      })
+      .set({ status: "failed", errorMessage: String(err), updatedAt: new Date() })
       .where(eq(jobsTable.id, jobId));
   }
 }

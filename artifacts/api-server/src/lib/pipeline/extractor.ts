@@ -2,11 +2,9 @@ import fs from "fs/promises";
 import path from "path";
 import type { ExtractedData } from "./types.js";
 
-async function extractPdf(filePath: string, filename: string): Promise<ExtractedData> {
+async function extractPdfFromBuffer(buffer: Buffer, filename: string): Promise<ExtractedData> {
   try {
-    // Dynamic import to handle potential build issues
     const pdfParse = await import("pdf-parse").then((m) => m.default || m);
-    const buffer = await fs.readFile(filePath);
     const data = await pdfParse(buffer);
     return {
       rawText: data.text || "",
@@ -29,7 +27,7 @@ async function extractPdf(filePath: string, filename: string): Promise<Extracted
   }
 }
 
-async function extractImage(filePath: string, filename: string, mimeType: string): Promise<ExtractedData> {
+async function extractImageFromPath(filePath: string, filename: string, mimeType: string): Promise<ExtractedData> {
   try {
     const Tesseract = await import("tesseract.js");
     const worker = await Tesseract.createWorker("eng");
@@ -53,10 +51,10 @@ async function extractImage(filePath: string, filename: string, mimeType: string
   }
 }
 
-async function extractDocx(filePath: string, filename: string): Promise<ExtractedData> {
+async function extractDocxFromBuffer(buffer: Buffer, filename: string): Promise<ExtractedData> {
   try {
     const mammoth = await import("mammoth");
-    const result = await mammoth.extractRawText({ path: filePath });
+    const result = await mammoth.extractRawText({ buffer });
     return {
       rawText: result.value || "",
       filename,
@@ -75,8 +73,8 @@ async function extractDocx(filePath: string, filename: string): Promise<Extracte
   }
 }
 
-async function extractText(filePath: string, filename: string, mimeType: string): Promise<ExtractedData> {
-  const text = await fs.readFile(filePath, "utf-8");
+function extractTextFromBuffer(buffer: Buffer, filename: string, mimeType: string): ExtractedData {
+  const text = buffer.toString("utf-8");
   return {
     rawText: text,
     filename,
@@ -107,31 +105,45 @@ export function extractDatesFromText(text: string): string[] {
   return Array.from(found);
 }
 
-export async function extractFile(filePath: string, filename: string, mimeType: string): Promise<ExtractedData> {
+export async function extractFileFromBuffer(
+  buffer: Buffer,
+  filename: string,
+  mimeType: string,
+  tempPath?: string
+): Promise<ExtractedData> {
   const ext = path.extname(filename).toLowerCase();
 
   if (mimeType === "application/pdf" || ext === ".pdf") {
-    return extractPdf(filePath, filename);
+    return extractPdfFromBuffer(buffer, filename);
   }
 
   if (mimeType.startsWith("image/") || [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".gif"].includes(ext)) {
-    return extractImage(filePath, filename, mimeType);
+    // OCR needs a file path — write to temp if path not provided
+    const workPath = tempPath ?? `/tmp/${randomId()}_${path.basename(filename)}`;
+    if (!tempPath) {
+      await fs.writeFile(workPath, buffer);
+    }
+    const result = await extractImageFromPath(workPath, filename, mimeType);
+    if (!tempPath) {
+      await fs.unlink(workPath).catch(() => {});
+    }
+    return result;
   }
 
   if (
     mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
     ext === ".docx"
   ) {
-    return extractDocx(filePath, filename);
+    return extractDocxFromBuffer(buffer, filename);
   }
 
   if (mimeType.startsWith("text/") || [".txt", ".md", ".csv", ".json", ".xml", ".html"].includes(ext)) {
-    return extractText(filePath, filename, mimeType);
+    return extractTextFromBuffer(buffer, filename, mimeType);
   }
 
   // Fallback: try reading as text
   try {
-    return extractText(filePath, filename, mimeType);
+    return extractTextFromBuffer(buffer, filename, mimeType);
   } catch {
     return {
       rawText: `[Cannot extract content from file type: ${mimeType}]`,
@@ -140,4 +152,20 @@ export async function extractFile(filePath: string, filename: string, mimeType: 
       metadata: { dates: [] },
     };
   }
+}
+
+function randomId(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+// Legacy path-based extractor (kept for backward compat)
+export async function extractFile(filePath: string, filename: string, mimeType: string): Promise<ExtractedData> {
+  const ext = path.extname(filename).toLowerCase();
+
+  if (mimeType.startsWith("image/") || [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".gif"].includes(ext)) {
+    return extractImageFromPath(filePath, filename, mimeType);
+  }
+
+  const buffer = await fs.readFile(filePath);
+  return extractFileFromBuffer(buffer, filename, mimeType, filePath);
 }
