@@ -1,0 +1,17 @@
+packages:
+  "framer-motion": "For page transitions, list animations, and polished interactions"
+  "react-dropzone": "For the drag-and-drop file upload interface"
+  "date-fns": "For formatting timeline dates and job timestamps"
+  "clsx": "Utility for constructing className strings conditionally"
+  "tailwind-merge": "Utility to resolve Tailwind class conflicts"
+  "lucide-react": "For beautiful consistent iconography"
+
+images:
+  - path: "artifacts/pipeline-ui/public/images/pipeline-hero-bg.png"
+    description: "Abstract dark mode technical background with glowing cyan and blue data lines, glowing nodes, and subtle geometric grid patterns, representing a data processing pipeline. Very dark, mostly black and deep slate."
+    aspect_ratio: "16:9"
+
+notes:
+  - "The app heavily relies on dark mode to fit the 'technical precision' design style."
+  - "All API calls use the generated hooks from @workspace/api-client-react."
+  - "Requires standard shadcn-like UI components to exist in src/components/ui (which they do per the directory structure)."

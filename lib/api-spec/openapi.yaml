@@ -3,13 +3,17 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Document Intelligence Pipeline API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: jobs
+    description: Pipeline job operations
+  - name: files
+    description: File upload operations
 paths:
   /healthz:
     get:
@@ -24,6 +28,188 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /jobs:
+    get:
+      operationId: listJobs
+      tags: [jobs]
+      summary: List all pipeline jobs
+      responses:
+        "200":
+          description: List of jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Job"
+                required:
+                  - jobs
+    post:
+      operationId: createJob
+      tags: [jobs]
+      summary: Create a new pipeline job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateJobRequest"
+      responses:
+        "201":
+          description: Job created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+
+  /jobs/{jobId}:
+    get:
+      operationId: getJob
+      tags: [jobs]
+      summary: Get job details
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Job details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobDetail"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /jobs/{jobId}/process:
+    post:
+      operationId: processJob
+      tags: [jobs]
+      summary: Trigger pipeline processing for a job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Processing started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /jobs/{jobId}/outputs:
+    get:
+      operationId: getJobOutputs
+      tags: [jobs]
+      summary: Get processed outputs for a job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Job outputs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobOutputs"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /jobs/{jobId}/timeline:
+    get:
+      operationId: getJobTimeline
+      tags: [jobs]
+      summary: Get reconstructed timeline for a job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Timeline events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TimelineEvent"
+                required:
+                  - events
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /jobs/{jobId}/upload:
+    post:
+      operationId: uploadFile
+      tags: [files]
+      summary: Upload a file to a job
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+              required:
+                - file
+      responses:
+        "201":
+          description: File uploaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadedFile"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +220,215 @@ components:
       required:
         - status
 
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+
+    JobStatus:
+      type: string
+      enum:
+        - pending
+        - processing
+        - completed
+        - failed
+
+    CreateJobRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+      required:
+        - name
+
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        fileCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        errorMessage:
+          type: string
+          nullable: true
+      required:
+        - id
+        - name
+        - status
+        - fileCount
+        - createdAt
+        - updatedAt
+
+    UploadedFile:
+      type: object
+      properties:
+        id:
+          type: string
+        jobId:
+          type: string
+        filename:
+          type: string
+        mimeType:
+          type: string
+        sizeBytes:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - jobId
+        - filename
+        - mimeType
+        - sizeBytes
+        - createdAt
+
+    TimelineEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        date:
+          type: string
+          nullable: true
+        dateInferred:
+          type: boolean
+        dateConfidence:
+          type: string
+          nullable: true
+        description:
+          type: string
+        sourceFile:
+          type: string
+        sourceLocation:
+          type: string
+          nullable: true
+        entities:
+          type: array
+          items:
+            type: string
+        eventType:
+          type: string
+          nullable: true
+      required:
+        - id
+        - dateInferred
+        - description
+        - sourceFile
+        - entities
+
+    RagChunk:
+      type: object
+      properties:
+        id:
+          type: string
+        text:
+          type: string
+        metadata:
+          type: object
+          properties:
+            date:
+              type: string
+              nullable: true
+            source:
+              type: string
+            entities:
+              type: array
+              items:
+                type: string
+            eventType:
+              type: string
+              nullable: true
+          required:
+            - source
+            - entities
+      required:
+        - id
+        - text
+        - metadata
+
+    FineTuneExample:
+      type: object
+      properties:
+        input:
+          type: string
+        output:
+          type: string
+        context:
+          type: string
+      required:
+        - input
+        - output
+        - context
+
+    JobOutputs:
+      type: object
+      properties:
+        masterDocument:
+          type: string
+          description: Full chronological master document text
+        ragChunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/RagChunk"
+        fineTuneExamples:
+          type: array
+          items:
+            $ref: "#/components/schemas/FineTuneExample"
+        validationReport:
+          type: object
+          properties:
+            totalFiles:
+              type: integer
+            processedFiles:
+              type: integer
+            totalEvents:
+              type: integer
+            totalEntities:
+              type: integer
+            conflictsDetected:
+              type: integer
+            dataLossRisk:
+              type: string
+          required:
+            - totalFiles
+            - processedFiles
+            - totalEvents
+            - totalEntities
+            - conflictsDetected
+            - dataLossRisk
+      required:
+        - masterDocument
+        - ragChunks
+        - fineTuneExamples
+        - validationReport
+
+    JobDetail:
+      allOf:
+        - $ref: "#/components/schemas/Job"
+        - type: object
+          properties:
+            files:
+              type: array
+              items:
+                $ref: "#/components/schemas/UploadedFile"
+          required:
+            - files
