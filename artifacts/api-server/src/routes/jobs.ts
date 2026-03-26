@@ -9,7 +9,6 @@ import {
   timelineEventsTable,
   jobOutputsTable,
   documentSegmentsTable,
-  type DocumentSegment,
 } from "@workspace/db";
 import { eq, desc, count } from "drizzle-orm";
 import { processJob } from "../lib/pipeline/processor.js";
@@ -17,13 +16,8 @@ import { extractFileFromBuffer } from "../lib/pipeline/extractor.js";
 import { PIPELINE_CONFIG } from "../lib/pipeline/config.js";
 import { CreateJobBody } from "@workspace/api-zod";
 
-// util for generating UUIDs for segments
-import { randomUUID } from "crypto";
-
 const router: IRouter = Router();
 
-// Memory storage — works on Vercel (no persistent disk needed).
-// Text is extracted immediately at upload and stored in the DB.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -123,7 +117,7 @@ router.get("/jobs/:jobId", async (req, res) => {
   });
 });
 
-// POST /jobs/:jobId/upload  — supports single or multiple files
+// POST /jobs/:jobId/upload
 router.post("/jobs/:jobId/upload", upload.array("file", PIPELINE_CONFIG.maxFilesPerRequest), async (req, res) => {
   const job = await db.query.jobsTable.findFirst({ where: eq(jobsTable.id, req.params.jobId) });
   if (!job) {
@@ -136,7 +130,6 @@ router.post("/jobs/:jobId/upload", upload.array("file", PIPELINE_CONFIG.maxFiles
     return;
   }
 
-  // Check total files per job
   const [{ value: existingCount }] = await db
     .select({ value: count() })
     .from(uploadedFilesTable)
@@ -154,12 +147,7 @@ router.post("/jobs/:jobId/upload", upload.array("file", PIPELINE_CONFIG.maxFiles
   const uploaded = [];
 
   for (const file of files) {
-    // Extract text immediately — this is what makes it Vercel-compatible
-    const extracted = await extractFileFromBuffer(
-      file.buffer,
-      file.originalname,
-      file.mimetype
-    ).catch(() => null);
+    const extracted = await extractFileFromBuffer(file.buffer, file.originalname, file.mimetype).catch(() => null);
 
     const [record] = await db
       .insert(uploadedFilesTable)
@@ -169,27 +157,27 @@ router.post("/jobs/:jobId/upload", upload.array("file", PIPELINE_CONFIG.maxFiles
         filename: file.originalname,
         mimeType: file.mimetype,
         sizeBytes: file.size,
-        storagePath: "", // No disk storage needed — rawText is persisted in DB
+        storagePath: "",
         rawText: extracted?.rawText ?? null,
       })
       .returning();
 
-    // Persist extracted segments into the documentSegmentsTable.  Segments are
-    // inserted individually to preserve ordering and allow granular queries.
-    if (extracted && Array.isArray(extracted.segments)) {
-      for (const seg of extracted.segments) {
-        await db.insert(documentSegmentsTable).values({
-          id: randomUUID(),
-          fileId: record.id,
-          segmentIndex: seg.index,
-          pageNumber: seg.page ?? null,
-          text: seg.text,
-          sourceOffset: seg.sourceOffset ?? null,
-          bbox: seg.bbox ? JSON.stringify(seg.bbox) : null,
-          extractor: seg.extractor ?? null,
-          confidence: seg.confidence ?? null,
-        });
-      }
+    // Persist structured segments to the DB (best-effort)
+    if (extracted?.segments && extracted.segments.length > 0) {
+      const segmentRows = extracted.segments.map((seg) => ({
+        id: randomUUID(),
+        fileId: record.id,
+        jobId: job.id,
+        segmentIndex: seg.index,
+        page: seg.page ?? null,
+        text: seg.text,
+        sourceOffset: seg.sourceOffset ?? null,
+        extractor: seg.extractor ?? null,
+        confidence: seg.confidence ?? null,
+      }));
+      await db.insert(documentSegmentsTable).values(segmentRows).catch((err) => {
+        req.log.warn({ err, fileId: record.id }, "Failed to persist segments");
+      });
     }
 
     uploaded.push({
@@ -198,14 +186,13 @@ router.post("/jobs/:jobId/upload", upload.array("file", PIPELINE_CONFIG.maxFiles
       filename: record.filename,
       mimeType: record.mimeType,
       sizeBytes: record.sizeBytes,
+      segmentCount: extracted?.segments?.length ?? 0,
       createdAt: record.createdAt.toISOString(),
     });
   }
 
-  // Update job timestamp
   await db.update(jobsTable).set({ updatedAt: new Date() }).where(eq(jobsTable.id, job.id));
 
-  // Return array if multiple, single object if one (backward compat)
   if (uploaded.length === 1) {
     res.status(201).json(uploaded[0]);
   } else {
@@ -228,7 +215,6 @@ router.post("/jobs/:jobId/process", async (req, res) => {
 
   res.status(202).json(jobToResponse(job, Number(fileCount)));
 
-  // Fire-and-forget — process asynchronously
   processJob(job.id).catch((err) => {
     req.log.error({ err, jobId: job.id }, "Background processing failed");
   });
@@ -300,19 +286,15 @@ router.get("/jobs/:jobId/outputs", async (req, res) => {
   });
 });
 
-// Multer error handler for this router
+// Multer error handler
 router.use((err: any, _req: any, res: any, next: any) => {
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
-      res.status(413).json({
-        error: `File too large. Maximum size is ${PIPELINE_CONFIG.maxFileSizeMB} MB.`,
-      });
+      res.status(413).json({ error: `File too large. Maximum size is ${PIPELINE_CONFIG.maxFileSizeMB} MB.` });
       return;
     }
     if (err.code === "LIMIT_FILE_COUNT") {
-      res.status(400).json({
-        error: `Too many files. Maximum ${PIPELINE_CONFIG.maxFilesPerRequest} per request.`,
-      });
+      res.status(400).json({ error: `Too many files. Maximum ${PIPELINE_CONFIG.maxFilesPerRequest} per request.` });
       return;
     }
     res.status(400).json({ error: err.message });

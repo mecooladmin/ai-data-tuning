@@ -33,7 +33,15 @@ export async function processJob(jobId: string): Promise<void> {
 
         let rawText: string;
 
-        if (file.rawText) {
+        const isExtractionError = (t: string | null) =>
+          !t ||
+          t.startsWith("[PDF extraction failed:") ||
+          t.startsWith("[OCR extraction failed:") ||
+          t.startsWith("[DOCX extraction failed:") ||
+          t.startsWith("[Cannot extract") ||
+          t.startsWith("[No content");
+
+        if (file.rawText && !isExtractionError(file.rawText)) {
           // Fast path: text was extracted at upload time (Vercel-compatible)
           rawText = file.rawText;
           logger.info({ fileId: file.id }, "Using pre-extracted text from DB");

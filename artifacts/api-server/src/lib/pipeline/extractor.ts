@@ -2,12 +2,59 @@ import fs from "fs/promises";
 import path from "path";
 import type { ExtractedData, ExtractedSegment } from "./types.js";
 
+// ---------------------------------------------------------------------------
+// Node.js polyfills for browser APIs expected by pdf-parse / pdfjs-dist
+// ---------------------------------------------------------------------------
+function applyPdfPolyfills() {
+  const g = globalThis as any;
+  if (!g.DOMMatrix) g.DOMMatrix = class DOMMatrix {};
+  if (!g.Path2D) g.Path2D = class Path2D {};
+  if (!g.ImageData)
+    g.ImageData = class ImageData {
+      constructor(public data: Uint8ClampedArray, public width: number, public height: number) {}
+    };
+}
+
+// ---------------------------------------------------------------------------
+// segmentText — split a block of text into ordered paragraph segments
+// ---------------------------------------------------------------------------
+export function segmentText(text: string): ExtractedSegment[] {
+  const lines = text.split(/\r?\n/);
+  const segments: ExtractedSegment[] = [];
+  let buffer: string[] = [];
+
+  function flush() {
+    const content = buffer.join("\n").trim();
+    if (content) {
+      segments.push({ index: segments.length, page: null, text: content });
+    }
+    buffer = [];
+  }
+
+  for (const line of lines) {
+    if (line.trim() === "") {
+      flush();
+    } else {
+      buffer.push(line);
+    }
+  }
+  flush();
+  return segments;
+}
+
+// ---------------------------------------------------------------------------
+// Format-specific extractors
+// ---------------------------------------------------------------------------
+
 async function extractPdfFromBuffer(buffer: Buffer, filename: string): Promise<ExtractedData> {
+  applyPdfPolyfills();
+
   try {
     const pdfParse = await import("pdf-parse").then((m) => m.default || m);
-    const data = await pdfParse(buffer);
-    const rawText = data.text || "";
+    const data = await pdfParse(buffer, { max: 50 });
+    const rawText = (data.text || "").trim();
     const segments = segmentText(rawText);
+
     return {
       rawText,
       filename,
@@ -44,9 +91,7 @@ async function extractImageFromPath(filePath: string, filename: string, mimeType
       filename,
       mimeType,
       segments,
-      metadata: {
-        dates: extractDatesFromText(rawText),
-      },
+      metadata: { dates: extractDatesFromText(rawText) },
     };
   } catch (err) {
     return {
@@ -70,9 +115,7 @@ async function extractDocxFromBuffer(buffer: Buffer, filename: string): Promise<
       filename,
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       segments,
-      metadata: {
-        dates: extractDatesFromText(rawText),
-      },
+      metadata: { dates: extractDatesFromText(rawText) },
     };
   } catch (err) {
     return {
@@ -93,12 +136,13 @@ function extractTextFromBuffer(buffer: Buffer, filename: string, mimeType: strin
     filename,
     mimeType,
     segments,
-    metadata: {
-      dates: extractDatesFromText(text),
-    },
+    metadata: { dates: extractDatesFromText(text) },
   };
 }
 
+// ---------------------------------------------------------------------------
+// Date extraction helper
+// ---------------------------------------------------------------------------
 export function extractDatesFromText(text: string): string[] {
   const patterns = [
     /\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b/g,
@@ -112,13 +156,14 @@ export function extractDatesFromText(text: string): string[] {
   const found = new Set<string>();
   for (const pattern of patterns) {
     const matches = text.match(pattern);
-    if (matches) {
-      matches.forEach((m) => found.add(m.trim()));
-    }
+    if (matches) matches.forEach((m) => found.add(m.trim()));
   }
   return Array.from(found);
 }
 
+// ---------------------------------------------------------------------------
+// Main entry point — buffer-based (Vercel / Azure / in-memory compatible)
+// ---------------------------------------------------------------------------
 export async function extractFileFromBuffer(
   buffer: Buffer,
   filename: string,
@@ -132,15 +177,10 @@ export async function extractFileFromBuffer(
   }
 
   if (mimeType.startsWith("image/") || [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".gif"].includes(ext)) {
-    // OCR needs a file path — write to temp if path not provided
     const workPath = tempPath ?? `/tmp/${randomId()}_${path.basename(filename)}`;
-    if (!tempPath) {
-      await fs.writeFile(workPath, buffer);
-    }
+    if (!tempPath) await fs.writeFile(workPath, buffer);
     const result = await extractImageFromPath(workPath, filename, mimeType);
-    if (!tempPath) {
-      await fs.unlink(workPath).catch(() => {});
-    }
+    if (!tempPath) await fs.unlink(workPath).catch(() => {});
     return result;
   }
 
@@ -155,7 +195,7 @@ export async function extractFileFromBuffer(
     return extractTextFromBuffer(buffer, filename, mimeType);
   }
 
-  // Fallback: try reading as text
+  // Fallback: try reading as plain text
   try {
     return extractTextFromBuffer(buffer, filename, mimeType);
   } catch {
@@ -173,7 +213,9 @@ function randomId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+// ---------------------------------------------------------------------------
 // Legacy path-based extractor (kept for backward compat)
+// ---------------------------------------------------------------------------
 export async function extractFile(filePath: string, filename: string, mimeType: string): Promise<ExtractedData> {
   const ext = path.extname(filename).toLowerCase();
 
@@ -183,37 +225,4 @@ export async function extractFile(filePath: string, filename: string, mimeType: 
 
   const buffer = await fs.readFile(filePath);
   return extractFileFromBuffer(buffer, filename, mimeType, filePath);
-}
-
-/**
- * segmentText
- *
- * Produce an array of segments from a block of text.  Segments are separated by
- * two or more newline characters (blank lines) or by single newlines when no
- * blank lines are present.  Leading/trailing whitespace is trimmed.  The
- * segments are numbered sequentially starting from zero.  This function does
- * not attempt to infer page numbers or bounding boxes; those values remain
- * null/undefined.
- */
-export function segmentText(text: string): ExtractedSegment[] {
-  const lines = text.split(/\r?\n/);
-  const segments: ExtractedSegment[] = [];
-  let buffer: string[] = [];
-  function flush() {
-    const content = buffer.join("\n").trim();
-    if (content) {
-      segments.push({ index: segments.length, page: null, text: content });
-    }
-    buffer = [];
-  }
-  for (const line of lines) {
-    if (line.trim() === "") {
-      // Blank line indicates new segment when buffer has content
-      flush();
-    } else {
-      buffer.push(line);
-    }
-  }
-  flush();
-  return segments;
 }
