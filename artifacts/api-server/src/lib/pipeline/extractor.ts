@@ -1,17 +1,20 @@
 import fs from "fs/promises";
 import path from "path";
-import type { ExtractedData } from "./types.js";
+import type { ExtractedData, ExtractedSegment } from "./types.js";
 
 async function extractPdfFromBuffer(buffer: Buffer, filename: string): Promise<ExtractedData> {
   try {
     const pdfParse = await import("pdf-parse").then((m) => m.default || m);
     const data = await pdfParse(buffer);
+    const rawText = data.text || "";
+    const segments = segmentText(rawText);
     return {
-      rawText: data.text || "",
+      rawText,
       filename,
       mimeType: "application/pdf",
+      segments,
       metadata: {
-        dates: extractDatesFromText(data.text || ""),
+        dates: extractDatesFromText(rawText),
         title: data.info?.Title || undefined,
         author: data.info?.Author || undefined,
         pages: data.numpages,
@@ -22,6 +25,7 @@ async function extractPdfFromBuffer(buffer: Buffer, filename: string): Promise<E
       rawText: `[PDF extraction failed: ${String(err)}]`,
       filename,
       mimeType: "application/pdf",
+      segments: [],
       metadata: { dates: [] },
     };
   }
@@ -33,12 +37,15 @@ async function extractImageFromPath(filePath: string, filename: string, mimeType
     const worker = await Tesseract.createWorker("eng");
     const { data } = await worker.recognize(filePath);
     await worker.terminate();
+    const rawText = data.text || "";
+    const segments = segmentText(rawText);
     return {
-      rawText: data.text || "",
+      rawText,
       filename,
       mimeType,
+      segments,
       metadata: {
-        dates: extractDatesFromText(data.text || ""),
+        dates: extractDatesFromText(rawText),
       },
     };
   } catch (err) {
@@ -46,6 +53,7 @@ async function extractImageFromPath(filePath: string, filename: string, mimeType
       rawText: `[OCR extraction failed: ${String(err)}]`,
       filename,
       mimeType,
+      segments: [],
       metadata: { dates: [] },
     };
   }
@@ -55,12 +63,15 @@ async function extractDocxFromBuffer(buffer: Buffer, filename: string): Promise<
   try {
     const mammoth = await import("mammoth");
     const result = await mammoth.extractRawText({ buffer });
+    const rawText = result.value || "";
+    const segments = segmentText(rawText);
     return {
-      rawText: result.value || "",
+      rawText,
       filename,
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      segments,
       metadata: {
-        dates: extractDatesFromText(result.value || ""),
+        dates: extractDatesFromText(rawText),
       },
     };
   } catch (err) {
@@ -68,6 +79,7 @@ async function extractDocxFromBuffer(buffer: Buffer, filename: string): Promise<
       rawText: `[DOCX extraction failed: ${String(err)}]`,
       filename,
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      segments: [],
       metadata: { dates: [] },
     };
   }
@@ -75,10 +87,12 @@ async function extractDocxFromBuffer(buffer: Buffer, filename: string): Promise<
 
 function extractTextFromBuffer(buffer: Buffer, filename: string, mimeType: string): ExtractedData {
   const text = buffer.toString("utf-8");
+  const segments = segmentText(text);
   return {
     rawText: text,
     filename,
     mimeType,
+    segments,
     metadata: {
       dates: extractDatesFromText(text),
     },
@@ -149,6 +163,7 @@ export async function extractFileFromBuffer(
       rawText: `[Cannot extract content from file type: ${mimeType}]`,
       filename,
       mimeType,
+      segments: [],
       metadata: { dates: [] },
     };
   }
@@ -168,4 +183,37 @@ export async function extractFile(filePath: string, filename: string, mimeType: 
 
   const buffer = await fs.readFile(filePath);
   return extractFileFromBuffer(buffer, filename, mimeType, filePath);
+}
+
+/**
+ * segmentText
+ *
+ * Produce an array of segments from a block of text.  Segments are separated by
+ * two or more newline characters (blank lines) or by single newlines when no
+ * blank lines are present.  Leading/trailing whitespace is trimmed.  The
+ * segments are numbered sequentially starting from zero.  This function does
+ * not attempt to infer page numbers or bounding boxes; those values remain
+ * null/undefined.
+ */
+export function segmentText(text: string): ExtractedSegment[] {
+  const lines = text.split(/\r?\n/);
+  const segments: ExtractedSegment[] = [];
+  let buffer: string[] = [];
+  function flush() {
+    const content = buffer.join("\n").trim();
+    if (content) {
+      segments.push({ index: segments.length, page: null, text: content });
+    }
+    buffer = [];
+  }
+  for (const line of lines) {
+    if (line.trim() === "") {
+      // Blank line indicates new segment when buffer has content
+      flush();
+    } else {
+      buffer.push(line);
+    }
+  }
+  flush();
+  return segments;
 }

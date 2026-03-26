@@ -2,12 +2,23 @@ import { Router, type IRouter } from "express";
 import multer from "multer";
 import path from "path";
 import { randomUUID } from "crypto";
-import { db, jobsTable, uploadedFilesTable, timelineEventsTable, jobOutputsTable } from "@workspace/db";
+import {
+  db,
+  jobsTable,
+  uploadedFilesTable,
+  timelineEventsTable,
+  jobOutputsTable,
+  documentSegmentsTable,
+  type DocumentSegment,
+} from "@workspace/db";
 import { eq, desc, count } from "drizzle-orm";
 import { processJob } from "../lib/pipeline/processor.js";
 import { extractFileFromBuffer } from "../lib/pipeline/extractor.js";
 import { PIPELINE_CONFIG } from "../lib/pipeline/config.js";
 import { CreateJobBody } from "@workspace/api-zod";
+
+// util for generating UUIDs for segments
+import { randomUUID } from "crypto";
 
 const router: IRouter = Router();
 
@@ -162,6 +173,24 @@ router.post("/jobs/:jobId/upload", upload.array("file", PIPELINE_CONFIG.maxFiles
         rawText: extracted?.rawText ?? null,
       })
       .returning();
+
+    // Persist extracted segments into the documentSegmentsTable.  Segments are
+    // inserted individually to preserve ordering and allow granular queries.
+    if (extracted && Array.isArray(extracted.segments)) {
+      for (const seg of extracted.segments) {
+        await db.insert(documentSegmentsTable).values({
+          id: randomUUID(),
+          fileId: record.id,
+          segmentIndex: seg.index,
+          pageNumber: seg.page ?? null,
+          text: seg.text,
+          sourceOffset: seg.sourceOffset ?? null,
+          bbox: seg.bbox ? JSON.stringify(seg.bbox) : null,
+          extractor: seg.extractor ?? null,
+          confidence: seg.confidence ?? null,
+        });
+      }
+    }
 
     uploaded.push({
       id: record.id,
