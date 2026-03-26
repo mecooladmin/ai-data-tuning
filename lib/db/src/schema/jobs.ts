@@ -9,11 +9,23 @@ export const jobStatusEnum = pgEnum("job_status", [
   "failed",
 ]);
 
+export const jobStageEnum = pgEnum("job_stage", [
+  "upload",
+  "extraction",
+  "normalization",
+  "event_detection",
+  "timeline_merge",
+  "output_generation",
+  "completed",
+]);
+
 export const jobsTable = pgTable("jobs", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   description: text("description"),
   status: jobStatusEnum("status").notNull().default("pending"),
+  stage: jobStageEnum("stage").notNull().default("upload"),
+  progress: integer("progress").notNull().default(0),
   errorMessage: text("error_message"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -78,3 +90,18 @@ export const jobOutputsTable = pgTable("job_outputs", {
 });
 
 export type JobOutput = typeof jobOutputsTable.$inferSelect;
+
+export const validationIssuesTable = pgTable("validation_issues", {
+  id: text("id").primaryKey(),
+  jobId: text("job_id")
+    .notNull()
+    .references(() => jobsTable.id, { onDelete: "cascade" }),
+  severity: text("severity").notNull(),
+  type: text("type").notNull(),
+  message: text("message").notNull(),
+  fileId: text("file_id").references(() => uploadedFilesTable.id, { onDelete: "set null" }),
+  eventId: text("event_id").references(() => timelineEventsTable.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+export type ValidationIssue = typeof validationIssuesTable.$inferSelect;

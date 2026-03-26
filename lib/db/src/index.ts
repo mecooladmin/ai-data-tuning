@@ -14,4 +14,12 @@ export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 export const db = drizzle(pool, { schema });
 
 export * from "./schema";
-export { documentSegmentsTable, type DocumentSegment, type InsertDocumentSegment } from "./schema/segments";
+export {
+  documentSegmentsTable,
+  entitiesTable,
+  eventEntitiesTable,
+  type DocumentSegment,
+  type InsertDocumentSegment,
+  type Entity,
+  type EventEntity,
+} from "./schema/segments";

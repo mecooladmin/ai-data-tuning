@@ -15,7 +15,12 @@ import { logger } from "../logger.js";
 export async function processJob(jobId: string): Promise<void> {
   await db
     .update(jobsTable)
-    .set({ status: "processing", updatedAt: new Date() })
+    .set({
+      status: "processing",
+      stage: "extraction",
+      progress: 10,
+      updatedAt: new Date(),
+    })
     .where(eq(jobsTable.id, jobId));
 
   try {
@@ -27,22 +32,23 @@ export async function processJob(jobId: string): Promise<void> {
     let processedFiles = 0;
     const allEvents: DetectedEvent[] = [];
 
-    for (const file of files) {
+    const isExtractionError = (t: string | null) =>
+      !t ||
+      t.startsWith("[PDF extraction failed:") ||
+      t.startsWith("[OCR extraction failed:") ||
+      t.startsWith("[DOCX extraction failed:") ||
+      t.startsWith("[Cannot extract") ||
+      t.startsWith("[No content");
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
       try {
         logger.info({ fileId: file.id, filename: file.filename }, "Processing file");
 
         let rawText: string;
 
-        const isExtractionError = (t: string | null) =>
-          !t ||
-          t.startsWith("[PDF extraction failed:") ||
-          t.startsWith("[OCR extraction failed:") ||
-          t.startsWith("[DOCX extraction failed:") ||
-          t.startsWith("[Cannot extract") ||
-          t.startsWith("[No content");
-
         if (file.rawText && !isExtractionError(file.rawText)) {
-          // Fast path: text was extracted at upload time (Vercel-compatible)
+          // Fast path: text was extracted at upload time (memory/Vercel-compatible)
           rawText = file.rawText;
           logger.info({ fileId: file.id }, "Using pre-extracted text from DB");
         } else if (file.storagePath) {
@@ -66,17 +72,40 @@ export async function processJob(jobId: string): Promise<void> {
       } catch (fileErr) {
         logger.error({ fileId: file.id, err: fileErr }, "Failed to process file");
       }
+
+      const progress = 10 + Math.floor(((i + 1) / files.length) * 40);
+      await db.update(jobsTable).set({ progress, updatedAt: new Date() }).where(eq(jobsTable.id, jobId));
     }
+
+    // 2. Normalization Stage
+    await db.update(jobsTable).set({
+      stage: "normalization",
+      progress: 50,
+      updatedAt: new Date(),
+    }).where(eq(jobsTable.id, jobId));
+
+    // 3. Event Detection Stage
+    await db.update(jobsTable).set({
+      stage: "event_detection",
+      progress: 60,
+      updatedAt: new Date(),
+    }).where(eq(jobsTable.id, jobId));
+
+    // 4. Timeline Merge Stage
+    await db.update(jobsTable).set({
+      stage: "timeline_merge",
+      progress: 70,
+      updatedAt: new Date(),
+    }).where(eq(jobsTable.id, jobId));
 
     const sortedEvents = mergeAndSortEvents(allEvents);
 
     // Clear existing timeline events
     await db.delete(timelineEventsTable).where(eq(timelineEventsTable.jobId, jobId));
 
-    // Insert new timeline events
-    for (let i = 0; i < sortedEvents.length; i++) {
-      const event = sortedEvents[i];
-      await db.insert(timelineEventsTable).values({
+    // Batch insert events (100 at a time)
+    if (sortedEvents.length > 0) {
+      const eventRows = sortedEvents.map((event, i) => ({
         id: randomUUID(),
         jobId,
         date: event.date,
@@ -88,8 +117,19 @@ export async function processJob(jobId: string): Promise<void> {
         entities: JSON.stringify(event.entities),
         eventType: event.eventType,
         sortOrder: i,
-      });
+      }));
+
+      for (let i = 0; i < eventRows.length; i += 100) {
+        await db.insert(timelineEventsTable).values(eventRows.slice(i, i + 100));
+      }
     }
+
+    // 5. Output Generation Stage
+    await db.update(jobsTable).set({
+      stage: "output_generation",
+      progress: 90,
+      updatedAt: new Date(),
+    }).where(eq(jobsTable.id, jobId));
 
     const masterDocument = generateMasterDocument(sortedEvents, job.name);
     const ragChunks = generateRagChunks(sortedEvents);
@@ -108,7 +148,12 @@ export async function processJob(jobId: string): Promise<void> {
 
     await db
       .update(jobsTable)
-      .set({ status: "completed", updatedAt: new Date() })
+      .set({
+        status: "completed",
+        stage: "completed",
+        progress: 100,
+        updatedAt: new Date(),
+      })
       .where(eq(jobsTable.id, jobId));
 
     logger.info({ jobId, events: sortedEvents.length }, "Job completed");

@@ -51,16 +51,25 @@ export function generateMasterDocument(events: DetectedEvent[], jobName: string)
 }
 
 export function generateRagChunks(events: DetectedEvent[]): RagChunk[] {
-  return events.map((event) => ({
-    id: randomUUID(),
-    text: event.description,
-    metadata: {
-      date: event.date,
-      source: event.sourceFile,
-      entities: event.entities,
-      eventType: event.eventType,
-    },
-  }));
+  return events.map((event, i) => {
+    // Enrich chunk text with surrounding context
+    const contextBefore = events.slice(Math.max(0, i - 1), i).map((e) => e.description).join(" ");
+    const contextAfter = events.slice(i + 1, i + 2).map((e) => e.description).join(" ");
+    const enrichedText = `${contextBefore} ${event.description} ${contextAfter}`.trim();
+
+    return {
+      id: randomUUID(),
+      text: enrichedText,
+      metadata: {
+        date: event.date,
+        dateInferred: event.dateInferred,
+        source: event.sourceFile,
+        sourceLocation: event.sourceLocation,
+        entities: event.entities,
+        eventType: event.eventType,
+      },
+    };
+  });
 }
 
 export function generateFineTuneExamples(events: DetectedEvent[], jobName: string): FineTuneExample[] {
@@ -78,7 +87,7 @@ export function generateFineTuneExamples(events: DetectedEvent[], jobName: strin
   for (const [date, dateEvents] of byDate) {
     if (date === "undated") continue;
     const context = dateEvents.map((e) => e.description).join(" ");
-    
+
     examples.push({
       input: `What happened on ${date} according to the ${jobName} documents?`,
       output: dateEvents.map((e) => e.description).join("\n"),
@@ -99,7 +108,7 @@ export function generateFineTuneExamples(events: DetectedEvent[], jobName: strin
   for (const [entity, entityEvents] of entityMap) {
     if (entityEvents.length < 2) continue;
     const context = entityEvents.map((e) => e.description).join(" ");
-    
+
     examples.push({
       input: `What is the full timeline of events involving ${entity}?`,
       output: entityEvents
@@ -109,7 +118,7 @@ export function generateFineTuneExamples(events: DetectedEvent[], jobName: strin
     });
   }
 
-  return examples.slice(0, 50); // Limit to 50 examples
+  return examples.slice(0, 50);
 }
 
 export function generateValidationReport(
@@ -120,14 +129,13 @@ export function generateValidationReport(
   const allEntities = new Set<string>();
   let conflictsDetected = 0;
 
-  // Count all unique entities
   for (const event of events) {
     for (const entity of event.entities) {
       allEntities.add(entity);
     }
   }
 
-  // Check for date conflicts (same entity, wildly different dates close together)
+  // Check for date conflicts (same entity, wildly different dates)
   const entityDates = new Map<string, string[]>();
   for (const event of events) {
     if (!event.date) continue;
@@ -141,12 +149,11 @@ export function generateValidationReport(
   for (const dates of entityDates.values()) {
     if (dates.length > 1) {
       const sorted = [...dates].sort();
-      // Flag if we have the same event with very different reported dates
       for (let i = 1; i < sorted.length; i++) {
         const prev = new Date(sorted[i - 1]).getTime();
         const curr = new Date(sorted[i]).getTime();
         const diffDays = Math.abs(curr - prev) / (1000 * 60 * 60 * 24);
-        if (diffDays > 365 * 5) conflictsDetected++; // 5+ year discrepancy flagged
+        if (diffDays > 365 * 5) conflictsDetected++;
       }
     }
   }

@@ -52,7 +52,9 @@ export interface RagChunk {
   text: string;
   metadata: {
     date: string | null;
+    dateInferred: boolean;
     source: string;
+    sourceLocation: string | null;
     entities: string[];
     eventType: string | null;
   };

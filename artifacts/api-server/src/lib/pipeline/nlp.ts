@@ -78,9 +78,11 @@ export function detectEntities(text: string): DetectedEntity[] {
   for (const pattern of PERSON_INDICATORS) {
     const matches = text.matchAll(pattern);
     for (const match of matches) {
-      const name = match[0].trim();
-      if (!seen.has(name) && name.length > 2) {
-        seen.add(name);
+      let name = match[0].trim();
+      // Normalize: remove common honorific prefixes
+      name = name.replace(/^(Mr\.|Ms\.|Mrs\.|Dr\.)\s+/i, "");
+      if (!seen.has(name.toLowerCase()) && name.length > 2) {
+        seen.add(name.toLowerCase());
         entities.push({ text: name, type: "PERSON" });
       }
     }
@@ -90,8 +92,10 @@ export function detectEntities(text: string): DetectedEntity[] {
     const matches = text.matchAll(pattern);
     for (const match of matches) {
       const name = match[0].trim();
-      if (!seen.has(name) && name.length > 2) {
-        seen.add(name);
+      // Normalize for deduplication: lowercase + strip trailing suffixes
+      const normalized = name.toLowerCase().replace(/\s+(inc\.|corp\.|ltd\.|llc\.?)$/i, "");
+      if (!seen.has(normalized) && name.length > 2) {
+        seen.add(normalized);
         entities.push({ text: name, type: "ORG" });
       }
     }
@@ -99,8 +103,8 @@ export function detectEntities(text: string): DetectedEntity[] {
 
   const dates = extractDatesFromText(text);
   for (const d of dates) {
-    if (!seen.has(d)) {
-      seen.add(d);
+    if (!seen.has(d.toLowerCase())) {
+      seen.add(d.toLowerCase());
       entities.push({ text: d, type: "DATE" });
     }
   }
@@ -120,7 +124,27 @@ function normalizeDate(rawDate: string): string | null {
   // Try to parse with Date
   const parsed = new Date(cleaned);
   if (!isNaN(parsed.getTime())) {
+    const year = parsed.getFullYear();
+    // Sanity check: reject obviously invalid years
+    if (year < 1900 || year > 2100) return null;
     return parsed.toISOString().split("T")[0];
+  }
+
+  // Handle common formats: DD/MM/YYYY or MM/DD/YYYY
+  const parts = cleaned.split(/[-/]/);
+  if (parts.length === 3) {
+    const p1 = parseInt(parts[0]);
+    const p2 = parseInt(parts[1]);
+    const p3 = parseInt(parts[2]);
+
+    // YYYY-MM-DD if p1 > 1900
+    if (p1 > 1900 && p2 <= 12 && p3 <= 31) {
+      return `${p1}-${String(p2).padStart(2, "0")}-${String(p3).padStart(2, "0")}`;
+    }
+    // DD-MM-YYYY if p3 > 1900
+    if (p3 > 1900 && p2 <= 12 && p1 <= 31) {
+      return `${p3}-${String(p2).padStart(2, "0")}-${String(p1).padStart(2, "0")}`;
+    }
   }
 
   return null;
@@ -130,7 +154,6 @@ function inferDateFromContext(
   sentence: string,
   surroundingText: string
 ): { date: string | null; inferred: boolean; confidence: string | null } {
-  // Look for dates in surrounding context (100 chars before/after)
   const contextDates = extractDatesFromText(surroundingText);
   if (contextDates.length > 0) {
     const normalized = normalizeDate(contextDates[0]);
@@ -216,7 +239,6 @@ export function extractEvents(text: string, sourceFile: string): DetectedEvent[]
 }
 
 export function mergeAndSortEvents(events: DetectedEvent[]): DetectedEvent[] {
-  // Sort: events with explicit dates first, then inferred, then undated
   return [...events].sort((a, b) => {
     if (a.date && b.date) {
       return a.date.localeCompare(b.date);
